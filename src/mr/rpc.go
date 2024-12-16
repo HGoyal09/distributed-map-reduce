@@ -5,6 +5,14 @@ import (
 )
 import "strconv"
 
+type JobType int
+
+const (
+	Map JobType = iota
+	Reduce
+	Finished
+)
+
 type JobArgs struct{}
 
 type JobMapReply struct {
@@ -20,7 +28,7 @@ type JobReduceReply struct {
 }
 
 type JobReply struct {
-	ReplyType   string
+	ReplyType   JobType
 	MapReply    JobMapReply
 	ReduceReply JobReduceReply
 }

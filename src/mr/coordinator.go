@@ -43,8 +43,8 @@ type Coordinator struct {
 	mu         sync.Mutex
 }
 
-func (c *Coordinator) MapFinish(args *JobMapFinishArgs, reply *JobFinishReply) error {
-	fmt.Println("MapFinish called")
+func (c *Coordinator) MapFinish(args *JobMapFinishArgs, _ *JobFinishReply) error {
+	log.Println("MapFinish called")
 
 	processFile := args.ProcessedFilename
 	ofilePrefix := args.OfilePrefix
@@ -54,13 +54,11 @@ func (c *Coordinator) MapFinish(args *JobMapFinishArgs, reply *JobFinishReply) e
 
 	c.mapData.fileInfo[processFile] = FileInfo{completed: true, ofilePrefix: ofilePrefix}
 
-	fmt.Println(c)
-
 	return nil
 }
 
-func (c *Coordinator) ReduceFinish(args *JobReduceFinishArgs, reply *JobFinishReply) error {
-	fmt.Println("ReduceFinish called")
+func (c *Coordinator) ReduceFinish(args *JobReduceFinishArgs, _ *JobFinishReply) error {
+	log.Println("ReduceFinish called")
 
 	reduceId := args.ReduceId
 	filename := args.Filename
@@ -68,103 +66,139 @@ func (c *Coordinator) ReduceFinish(args *JobReduceFinishArgs, reply *JobFinishRe
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	reduceState, ok := c.reduceData.reduceState[reduceId]
-	if ok {
-		reduceState.finished = true
-		reduceState.fileName = filename
-		c.reduceData.reduceState[reduceId] = reduceState
-	}
-
-	fmt.Printf("Finished reducing id: %v", c.reduceData.reduceState[reduceId].finished)
+	c.reduceData.reduceState[reduceId] = ReduceStatus{finished: true, fileName: filename}
+	log.Printf("Finished reducing id: %v", c.reduceData.reduceState[reduceId].finished)
 
 	return nil
+}
+
+func (c *Coordinator) fetchMapJob() (JobReply, bool) {
+	for {
+		fileName := c.getCurrentFile()
+		if fileName == "" {
+			if c.allJobsCompleted() {
+				log.Println("All Map jobs are completed")
+				return JobReply{}, false
+			}
+			time.Sleep(time.Second) // Wait and retry
+			continue
+		}
+
+		// Assign a map job
+		mapJob := JobReply{
+			ReplyType: Map,
+			MapReply: JobMapReply{
+				FileName: fileName,
+				MapId:    c.mapData.mapId,
+				NReduce:  c.nReduce,
+				Finish:   false,
+			},
+		}
+
+		c.mapData.mapId++
+		log.Printf("Assigned map job: %v\n", mapJob.MapReply)
+		return mapJob, true
+	}
+}
+
+func (c *Coordinator) fetchReduceJob() (JobReply, bool) {
+	if c.reduceData.files == nil {
+		c.initializeReduceData()
+	}
+
+	for i := 0; i < c.nReduce; i++ {
+		reduceState := c.getReduceState(i)
+		if !reduceState.finished && time.Since(reduceState.startTime) > time.Second*10 {
+			// Assign a reduce job
+			reduceState.startTime = time.Now()
+			c.reduceData.reduceState[i] = reduceState
+
+			reduceJob := JobReply{
+				ReplyType: Reduce,
+				ReduceReply: JobReduceReply{
+					ReduceId: i,
+					Files:    c.reduceData.files,
+				},
+			}
+			return reduceJob, true
+		}
+	}
+
+	return JobReply{}, false
+}
+
+// Initialize reduce data based on completed map jobs
+func (c *Coordinator) initializeReduceData() {
+	c.reduceData.files = []string{}
+	for _, fileInfo := range c.mapData.fileInfo {
+		if fileInfo.completed {
+			c.reduceData.files = append(c.reduceData.files, fileInfo.ofilePrefix)
+		}
+	}
+	c.reduceData.reduceState = make(map[int]ReduceStatus)
+}
+
+func (c *Coordinator) getReduceState(reduceId int) ReduceStatus {
+	state, exists := c.reduceData.reduceState[reduceId]
+	if !exists {
+		state = ReduceStatus{finished: false}
+	}
+	return state
 }
 
 func (c *Coordinator) FetchJob(args *JobArgs, reply *JobReply) error {
 	fmt.Printf("Fetch job..., id: %v, nReduce: %v\n", c.mapData.mapId, c.nReduce)
 
-	var fileName string
-	var isAllCompleted bool
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for {
-		fileName, isAllCompleted = getCurrentFile(c)
-		reply.ReplyType = "Map"
-		if isAllCompleted {
-			fmt.Printf("Notifying done. IsAllCompleted: %v\n", isAllCompleted)
-			reply.MapReply.Finish = true
-			break
-		}
-
-		if fileName != "" {
-			fmt.Printf("Using file. fileName: %v, isAllCompleted: %v\n", fileName, isAllCompleted)
-			reply.MapReply.FileName = fileName
-			reply.MapReply.MapId = c.mapData.mapId
-			reply.MapReply.NReduce = c.nReduce
-			reply.MapReply.Finish = isAllCompleted
-			c.mapData.mapId++
-			fmt.Printf("Returning map job: %v\n", reply.MapReply)
-			return nil
-		}
-		fmt.Printf("Waiting for file. fileName: %v, isAllCompleted: %v\n", fileName, isAllCompleted)
-		time.Sleep(time.Second)
+	// Attempt to fetch a map job
+	if mapJob, mapJobAvailable := c.fetchMapJob(); mapJobAvailable {
+		*reply = mapJob
+		return nil
 	}
 
-	if isAllCompleted {
-		reply.ReplyType = "Reduce"
-
-		if c.reduceData.files == nil {
-			c.reduceData.files = []string{}
-			for _, fileInfo := range c.mapData.fileInfo {
-				if fileInfo.completed {
-					c.reduceData.files = append(c.reduceData.files, fileInfo.ofilePrefix)
-				}
-			}
-		}
-
-		if c.reduceData.reduceState == nil {
-			c.reduceData.reduceState = make(map[int]ReduceStatus)
-		}
-
-		for i := 0; i < c.nReduce; i++ {
-			reduceState, ok := c.reduceData.reduceState[i]
-			if !ok || (!reduceState.finished && time.Since(reduceState.startTime) > time.Second*10) {
-				fmt.Printf("Returning reduce job: %v, time: %v, current: %v\n", i, reduceState.startTime, time.Now())
-				reduceState.startTime = time.Now()
-				c.reduceData.reduceState[i] = reduceState
-				reply.ReduceReply.ReduceId = i
-				reply.ReduceReply.Files = c.reduceData.files
-				return nil
-			}
-		}
-
-		fmt.Println("All reduce jobs completed")
+	// Attempt to fetch a reduce job
+	if reduceJob, reduceJobAvailable := c.fetchReduceJob(); reduceJobAvailable {
+		*reply = reduceJob
+		return nil
 	}
 
-	reply.ReplyType = "Finished"
+	// If no jobs are available, mark as finished
+	reply.ReplyType = Finished
 	c.doneChan <- true
-
+	log.Println("All jobs (Map and Reduce) are completed")
 	return nil
 }
 
-func getCurrentFile(c *Coordinator) (string, bool) {
-	isAllCompleted := true
-	for _, filename := range c.mapData.files {
-		fileInfo, mappingFound := c.mapData.fileInfo[filename]
-		if !mappingFound || (!fileInfo.completed && time.Since(fileInfo.startTime) > time.Second*10) {
-			fileInfo.startTime = time.Now()
-			c.mapData.fileInfo[filename] = fileInfo
-			fmt.Printf("Returning file name: %v, startTime: %v, completed: %v\n", filename, fileInfo.startTime, fileInfo.completed)
-			return filename, false
-		}
+func (c *Coordinator) allJobsCompleted() bool {
+	for _, fileInfo := range c.mapData.fileInfo {
 		if !fileInfo.completed {
-			isAllCompleted = false
+			return false
 		}
 	}
-	fmt.Printf("No file to run. isAllCompleted: %v\n", isAllCompleted)
-	return "", isAllCompleted
+	return true
+}
+
+func (c *Coordinator) getCurrentFile() string {
+	for _, filename := range c.mapData.files {
+		if c.handlePendingFile(filename) {
+			log.Printf("Mapping files: %v", filename)
+			return filename
+		}
+	}
+	log.Printf("No file to run")
+	return ""
+}
+
+func (c *Coordinator) handlePendingFile(filename string) bool {
+	fileInfo, exists := c.mapData.fileInfo[filename]
+	if !exists || (!fileInfo.completed && time.Since(fileInfo.startTime) > time.Second*10) {
+		fileInfo.startTime = time.Now()
+		c.mapData.fileInfo[filename] = fileInfo
+		return true
+	}
+	return false
 }
 
 func (c *Coordinator) server() {

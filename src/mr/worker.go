@@ -32,96 +32,189 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	for {
-		jobReply := FetchJob()
+
+		jobReply := fetchJob()
 
 		switch jobReply.ReplyType {
-		case "Map":
-			mapReply := jobReply.MapReply
-			if mapReply.Finish {
-				fmt.Printf("Map job finished: %v\n", mapReply.Finish)
-				break
-			}
-			filename, content := getFile(mapReply.FileName)
-
-			fmt.Printf("Mapping file: %v\n", filename)
-
-			kva := mapf(filename, string(content))
-			sort.Sort(ByKey(kva))
-
-			fmt.Println(mapReply.MapId, mapReply.NReduce)
-
-			ofilePrefix := fmt.Sprintf("mr-out-%d", mapReply.MapId)
-
-			storeKva(ofilePrefix, kva, mapReply.NReduce)
-
-			fmt.Printf("Finished mapping file: %v\n", filename)
-
-			notifyFinish(ofilePrefix, filename)
-		case "Reduce":
-			reduceReply := jobReply.ReduceReply
-			fmt.Printf("Reduce job running for: %v\n", reduceReply.ReduceId)
-
-			intermediate := make(map[string][]string)
-
-			for _, filePrefix := range reduceReply.Files {
-				filename := fmt.Sprintf("%v-%d", filePrefix, reduceReply.ReduceId)
-				_, content := getFile(filename)
-
-				fmt.Printf("Reducing file: %s\n", filename)
-				lines := strings.Split(string(content), "\n")
-
-				for _, line := range lines {
-					if line == "" {
-						continue
-					}
-					kv := strings.SplitN(line, " ", 2)
-					key := kv[0]
-					value := kv[1]
-
-					if _, ok := intermediate[key]; !ok {
-						intermediate[key] = []string{}
-					}
-					intermediate[key] = append(intermediate[key], value)
-				}
-			}
-
-			// Sort the keys
-			var keys []string
-			for key := range intermediate {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-
-			// Create the output file
-			oname := fmt.Sprintf("mr-out-%d", reduceReply.ReduceId)
-			ofile, err := os.Create(oname)
-			if err != nil {
-				log.Fatalf("cannot create %v", oname)
-			}
-			defer ofile.Close()
-
-			// Process each key and write the result to the output file
-			for _, key := range keys {
-				output := reducef(key, intermediate[key])
-				fmt.Fprintf(ofile, "%v %v\n", key, output)
-			}
-
-			notifyReduceFinish(reduceReply.ReduceId, oname)
-		case "Finished":
+		case Map:
+			processMapJob(jobReply.MapReply, mapf)
+		case Reduce:
+			processReduceJob(jobReply.ReduceReply, reducef)
+		case Finished:
 			fmt.Println("All jobs finished")
 			return
 		default:
 			fmt.Println("No job found")
 		}
+
+		//jobReply := fetchJob()
+		//
+		//switch jobReply.ReplyType {
+		//case Map:
+		//	mapReply := jobReply.MapReply
+		//	if mapReply.Finish {
+		//		fmt.Printf("Map job finished: %v\n", mapReply.Finish)
+		//		break
+		//	}
+		//	filename, content := getFile(mapReply.FileName)
+		//
+		//	fmt.Printf("Mapping file: %v\n", filename)
+		//
+		//	kva := mapf(filename, string(content))
+		//	sort.Sort(ByKey(kva))
+		//
+		//	fmt.Println(mapReply.MapId, mapReply.NReduce)
+		//
+		//	ofilePrefix := fmt.Sprintf("mr-out-%d", mapReply.MapId)
+		//
+		//	storeKva(ofilePrefix, kva, mapReply.NReduce)
+		//
+		//	fmt.Printf("Finished mapping file: %v\n", filename)
+		//
+		//	notifyFinish(ofilePrefix, filename)
+		//case Reduce:
+		//	reduceReply := jobReply.ReduceReply
+		//	fmt.Printf("Reduce job running for: %v\n", reduceReply.ReduceId)
+		//
+		//	intermediate := make(map[string][]string)
+		//
+		//	for _, filePrefix := range reduceReply.Files {
+		//		filename := fmt.Sprintf("%v-%d", filePrefix, reduceReply.ReduceId)
+		//		_, content := getFile(filename)
+		//
+		//		fmt.Printf("Reducing file: %s\n", filename)
+		//		lines := strings.Split(string(content), "\n")
+		//
+		//		for _, line := range lines {
+		//			if line == "" {
+		//				continue
+		//			}
+		//			kv := strings.SplitN(line, " ", 2)
+		//			key := kv[0]
+		//			value := kv[1]
+		//
+		//			if _, ok := intermediate[key]; !ok {
+		//				intermediate[key] = []string{}
+		//			}
+		//			intermediate[key] = append(intermediate[key], value)
+		//		}
+		//	}
+		//
+		//	// Sort the keys
+		//	var keys []string
+		//	for key := range intermediate {
+		//		keys = append(keys, key)
+		//	}
+		//	sort.Strings(keys)
+		//
+		//	// Create the output file
+		//	oname := fmt.Sprintf("mr-out-%d", reduceReply.ReduceId)
+		//	ofile, err := os.Create(oname)
+		//	if err != nil {
+		//		log.Fatalf("cannot create %v", oname)
+		//	}
+		//	defer ofile.Close()
+		//
+		//	// Process each key and write the result to the output file
+		//	for _, key := range keys {
+		//		output := reducef(key, intermediate[key])
+		//		fmt.Fprintf(ofile, "%v %v\n", key, output)
+		//	}
+		//
+		//	notifyReduceFinish(reduceReply.ReduceId, oname)
+		//case Finished:
+		//	fmt.Println("All jobs finished")
+		//	return
+		//default:
+		//	fmt.Println("No job found")
+		//}
 	}
+}
+
+func processMapJob(mapReply JobMapReply, mapf func(string, string) []KeyValue) {
+	if mapReply.Finish {
+		fmt.Printf("Map job finished: %v\n", mapReply.Finish)
+		return
+	}
+
+	filename, content := getFile(mapReply.FileName)
+	fmt.Printf("Mapping file: %v\n", filename)
+
+	// Perform the map operation
+	kva := mapf(filename, string(content))
+	sort.Sort(ByKey(kva))
+
+	ofilePrefix := fmt.Sprintf("mr-out-%d", mapReply.MapId)
+	storeKva(ofilePrefix, kva, mapReply.NReduce)
+
+	fmt.Printf("Finished mapping file: %v\n", filename)
+	notifyFinish(ofilePrefix, filename)
+}
+
+func processReduceJob(reduceReply JobReduceReply, reducef func(string, []string) string) {
+	fmt.Printf("Reduce job running for: %v\n", reduceReply.ReduceId)
+
+	intermediate := loadIntermediateData(reduceReply)
+
+	// Sort the keys
+	keys := sortedKeys(intermediate)
+
+	// Create the output file
+	oname := fmt.Sprintf("mr-out-%d", reduceReply.ReduceId)
+	ofile, err := os.Create(oname)
+	if err != nil {
+		log.Fatalf("Cannot create %v", oname)
+	}
+	defer ofile.Close()
+
+	// Process each key and write the result
+	for _, key := range keys {
+		output := reducef(key, intermediate[key])
+		fmt.Fprintf(ofile, "%v %v\n", key, output)
+	}
+
+	notifyReduceFinish(reduceReply.ReduceId, oname)
+}
+
+func loadIntermediateData(reduceReply JobReduceReply) map[string][]string {
+	intermediate := make(map[string][]string)
+
+	for _, filePrefix := range reduceReply.Files {
+		filename := fmt.Sprintf("%v-%d", filePrefix, reduceReply.ReduceId)
+		_, content := getFile(filename)
+
+		fmt.Printf("Reducing file: %s\n", filename)
+		lines := strings.Split(string(content), "\n")
+
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			kv := strings.SplitN(line, " ", 2)
+			key := kv[0]
+			value := kv[1]
+			intermediate[key] = append(intermediate[key], value)
+		}
+	}
+
+	return intermediate
+}
+
+func sortedKeys(intermediate map[string][]string) []string {
+	var keys []string
+	for key := range intermediate {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func notifyFinish(ofilePrefix, filename string) {
 	mapFinishArgs := JobMapFinishArgs{OfilePrefix: ofilePrefix, ProcessedFilename: filename}
-	var mapFinishReply JobFinishReply
-	fmt.Printf("Map task finished for file: %v\n", filename)
 
-	call("Coordinator.MapFinish", &mapFinishArgs, &mapFinishReply)
+	log.Printf("Map task finished for file: %v\n", filename)
+
+	call("Coordinator.MapFinish", &mapFinishArgs, nil)
 }
 
 func notifyReduceFinish(reduceId int, filename string) {
@@ -184,7 +277,7 @@ func storeKva(ofilePrefix string, kva []KeyValue, nReduce int) {
 	}
 }
 
-func FetchJob() JobReply {
+func fetchJob() JobReply {
 	var jobRepl JobReply
 	var args JobArgs
 
