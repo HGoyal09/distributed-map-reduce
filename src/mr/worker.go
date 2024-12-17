@@ -33,12 +33,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	for {
-		//rand.Seed(time.Now().UnixNano())   // Seed the random number generator
-		//randomSeconds := rand.Intn(10) + 2 // Generate a random number between 1 and 10
-		//fmt.Printf("Sleeping for %d seconds...\n", randomSeconds)
-		//time.Sleep(time.Duration(randomSeconds) * time.Second)
-		//fmt.Println("Woke up!")
-
 		jobReply := fetchJob()
 
 		switch jobReply.ReplyType {
@@ -158,12 +152,14 @@ func notifyReduceFinish(reduceId int, filename string) {
 func getFile(filename string) (string, []byte) {
 	file, err := os.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+		log.Printf("cannot open %v", filename)
+		return "", []byte{}
 	}
 	content, err := ioutil.ReadAll(file)
 
 	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+		log.Printf("cannot read %v", filename)
+		return "", []byte{}
 	}
 	file.Close()
 
