@@ -15,8 +15,8 @@ go build -o mrworker ../main/mrworker.go
 
 sleep 1
 
-./mrworker wc.so
-./mrworker wc.so
+./mrworker wc.so &
+./mrworker wc.so &
 ./mrworker wc.so
 
 # cleanup
