@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"sync"
 )
@@ -43,6 +42,33 @@ type Coordinator struct {
 	mu         sync.Mutex
 }
 
+// FetchJob Fetch the next job for the worker
+func (c *Coordinator) FetchJob(args *JobArgs, reply *JobReply) error {
+	log.Printf("Fetch job..., id: %v, nReduce: %v\n", c.mapData.mapId, c.nReduce)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Attempt to fetch a map job
+	if mapJob, mapJobAvailable := c.fetchMapJob(); mapJobAvailable {
+		*reply = mapJob
+		return nil
+	}
+
+	// Attempt to fetch a reduce job
+	if reduceJob, reduceJobAvailable := c.fetchReduceJob(); reduceJobAvailable {
+		*reply = reduceJob
+		return nil
+	}
+
+	// If no jobs are available, mark as finished
+	reply.ReplyType = Finished
+	c.doneChan <- true
+	log.Println("All jobs (Map and Reduce) are completed")
+	return nil
+}
+
+// MapFinish Mark the map job as completed
 func (c *Coordinator) MapFinish(args *JobMapFinishArgs, _ *JobFinishReply) error {
 	log.Println("MapFinish called")
 
@@ -57,6 +83,7 @@ func (c *Coordinator) MapFinish(args *JobMapFinishArgs, _ *JobFinishReply) error
 	return nil
 }
 
+// ReduceFinish Mark the reduce job as completed
 func (c *Coordinator) ReduceFinish(args *JobReduceFinishArgs, _ *JobFinishReply) error {
 	log.Println("ReduceFinish called")
 
@@ -72,6 +99,7 @@ func (c *Coordinator) ReduceFinish(args *JobReduceFinishArgs, _ *JobFinishReply)
 	return nil
 }
 
+// Fetch the next map job. Return empty if not available
 func (c *Coordinator) fetchMapJob() (JobReply, bool) {
 	for {
 		fileName := c.getCurrentFile()
@@ -101,6 +129,7 @@ func (c *Coordinator) fetchMapJob() (JobReply, bool) {
 	}
 }
 
+// Fetch the next reduce job. Return empty if not available
 func (c *Coordinator) fetchReduceJob() (JobReply, bool) {
 	if c.reduceData.files == nil {
 		c.initializeReduceData()
@@ -146,31 +175,6 @@ func (c *Coordinator) getReduceState(reduceId int) ReduceStatus {
 	return state
 }
 
-func (c *Coordinator) FetchJob(args *JobArgs, reply *JobReply) error {
-	fmt.Printf("Fetch job..., id: %v, nReduce: %v\n", c.mapData.mapId, c.nReduce)
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Attempt to fetch a map job
-	if mapJob, mapJobAvailable := c.fetchMapJob(); mapJobAvailable {
-		*reply = mapJob
-		return nil
-	}
-
-	// Attempt to fetch a reduce job
-	if reduceJob, reduceJobAvailable := c.fetchReduceJob(); reduceJobAvailable {
-		*reply = reduceJob
-		return nil
-	}
-
-	// If no jobs are available, mark as finished
-	reply.ReplyType = Finished
-	c.doneChan <- true
-	log.Println("All jobs (Map and Reduce) are completed")
-	return nil
-}
-
 func (c *Coordinator) allJobsCompleted() bool {
 	for _, fileInfo := range c.mapData.fileInfo {
 		if !fileInfo.completed {
@@ -191,6 +195,7 @@ func (c *Coordinator) getCurrentFile() string {
 	return ""
 }
 
+// get file to map
 func (c *Coordinator) handlePendingFile(filename string) bool {
 	fileInfo, exists := c.mapData.fileInfo[filename]
 	if !exists || (!fileInfo.completed && time.Since(fileInfo.startTime) > time.Second*10) {
